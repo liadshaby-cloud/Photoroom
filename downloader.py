@@ -4,8 +4,6 @@ No cookies, remote debugging, private endpoints, or browser-profile copying.
 """
 import argparse
 import ctypes
-import hashlib
-import json
 from pathlib import Path
 import re
 import signal
@@ -307,11 +305,6 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     destination = Path.home() / 'Downloads'
-    state_path = destination / 'photoroom-progress.json'
-    try:
-        state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
-    except (OSError, json.JSONDecodeError):
-        raise RuntimeError('קובץ ההתקדמות ב-Downloads פגום. שנו את שמו או מחקו אותו והפעילו מחדש.')
     browser = Chrome()
     print('Chrome זוהה. מתחיל מהתמונה המוגדלת הנוכחית.', flush=True)
     time.sleep(.25)
@@ -351,31 +344,12 @@ def main():
             return
         visited.add(label)
 
-        entry = state['saved'].get(label)
-        if entry:
-            existing = destination / Path(entry['file']).name
-            if existing.exists() and hashlib.sha256(existing.read_bytes()).hexdigest() == entry['sha256']:
-                print(f'כבר נשמר: {label}', flush=True)
-                browser.key(124)
-            else:
-                # Stale progress must not prevent a fresh save.
-                state['saved'].pop(label, None)
-                continue
-        else:
-            print(f'שומר: {label}', flush=True)
-            target, dimensions = browser.save(label, destination, max(.15, args.settle))
-            state['saved'][label] = {
-                'file': target.name,
-                'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
-                'dimensions': dimensions
-            }
-            temporary = state_path.with_suffix('.json.tmp')
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-            temporary.replace(state_path)
-            saved_now += 1
-            print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
-            if args.limit and saved_now >= args.limit:
-                return
+        print(f'שומר: {label}', flush=True)
+        target, dimensions = browser.save(label, destination, max(.15, args.settle))
+        saved_now += 1
+        print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
+        if args.limit and saved_now >= args.limit:
+            return
 
         previous = label
         deadline = time.monotonic() + 3
