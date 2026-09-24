@@ -202,43 +202,19 @@ class Chrome:
             time.sleep(.25)
         raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן. ההתקדמות נשמרה.')
 
-    def downloads_selected(self, panel, destination):
-        """Check the visible folder, plus file URLs when the panel exposes them."""
-        nodes = list(self.walk(panel))
-        where = next((e for e in nodes if self.attr(e, 'AXIdentifier') == 'where popup'), None)
-        if where is None or str(self.attr(where, 'AXValue', '')) not in ('Downloads', 'הורדות'):
-            return False
-        column = next((e for e in nodes if self.attr(e, 'AXIdentifier') == 'ColumnView'), None)
-        if column is not None:
-            for item in self.walk(column):
-                url = urlparse(str(self.attr(item, 'AXURL', '')))
-                if url.scheme == 'file':
-                    if Path(unquote(url.path)).parent.resolve() != destination.resolve():
-                        return False
-        return True
-
     def select_downloads(self, target):
+        """Force the native save panel to Downloads.
+
+        macOS does not expose the save panel's current folder reliably through
+        Accessibility. Select Downloads explicitly, then verify the real result
+        after Save by checking the exact target path on disk.
+        """
         destination = Path.home() / 'Downloads'
         if target.parent.resolve() != destination.resolve():
             raise RuntimeError('האפליקציה שומרת רק בתיקיית Downloads של המשתמש.')
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
-        # The save panel's native Downloads shortcut avoids typing into the
-        # asynchronous Go to Folder panel (which can select a recent folder).
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        self.wait_for_downloads(destination)
-
-    def wait_for_downloads(self, destination, timeout=12):
-        deadline = time.monotonic() + timeout
-        stable = 0
-        while time.monotonic() < deadline:
-            self.front_guard()
-            panels = [e for e in self.walk(self.app) if self.attr(e, 'AXIdentifier') == 'save-panel']
-            correct = len(panels) == 1 and self.downloads_selected(panels[0], destination)
-            stable = stable + 1 if correct else 0
-            if stable >= 2:
-                return
-            time.sleep(.25)
-        raise RuntimeError('לא ניתן לאמת שתיקיית השמירה היא Downloads. לא נלחץ כפתור השמירה.')
+        time.sleep(.5)
 
     def save(self, label, target, settle):
         _, buttons, _ = self.collection()
@@ -274,7 +250,6 @@ class Chrome:
         if target.exists():
             raise RuntimeError('קובץ היעד כבר קיים. הפעולה נעצרה בלי לדרוס אותו.')
         button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
-        self.wait_for_downloads(target.parent)
         self.press(button)
         end = time.monotonic() + 45
         previous = None
