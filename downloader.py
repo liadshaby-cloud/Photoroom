@@ -285,8 +285,10 @@ class Chrome:
         if not default_name:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
         before = self.download_snapshot(destination)
-        button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
-        self.press(button)
+        # The filename field is already focused in the native save panel.
+        # Enter activates the default Save button immediately and avoids an
+        # expensive accessibility-tree scan for OKButton.
+        self.key(36)  # Return / Enter
         target = self.wait_for_new_download(destination, before, default_name)
         dimensions = png_size(target)
         # Move directly to the next fullscreen image. This is substantially
