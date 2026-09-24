@@ -203,7 +203,7 @@ class Chrome:
         """Force Chrome's native save panel to Downloads."""
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.7)
+        time.sleep(.15)
 
     def download_snapshot(self, destination):
         """Return regular files currently present in Downloads."""
@@ -217,7 +217,7 @@ class Chrome:
                 pass
         return result
 
-    def wait_for_new_download(self, destination, before, default_name, timeout=60):
+    def wait_for_new_download(self, destination, before, default_name, timeout=20):
         """Identify the file Chrome actually created, independent of extension display."""
         deadline = time.monotonic() + timeout
         candidate = None
@@ -250,31 +250,29 @@ class Chrome:
                     stable += 1
                 else:
                     candidate, previous_size, stable = path, size, 0
-                if stable >= 3:
+                if stable >= 1:
                     return path
-            time.sleep(.4)
+            time.sleep(.12)
         raise RuntimeError('לא ניתן לזהות ולאמת את הקובץ החדש שנשמר ב-Downloads.')
 
     def save(self, label, destination, settle):
-        _, buttons, _ = self.collection()
-        selected = next((b for b in buttons if self.label(b) == label), None)
-        if selected is None:
-            raise RuntimeError('התמונה נעלמה מהרשימה; הפעולה נעצרה')
-        self.press(selected)
-        end = time.monotonic() + 20
-        while time.monotonic() < end:
-            _, _, images = self.collection()
-            current = next((i for i in images if self.label(i) == label), None)
-            if current is not None:
-                break
-            time.sleep(.2)
-        else:
-            raise RuntimeError('התמונה הנבחרת לא נטענה')
-        time.sleep(settle)
-        _, _, images = self.collection()
+        _, buttons, images = self.collection()
         current = next((i for i in images if self.label(i) == label), None)
         if current is None:
-            raise RuntimeError('התמונה הנבחרת נעלמה לפני השמירה.')
+            selected = next((b for b in buttons if self.label(b) == label), None)
+            if selected is None:
+                raise RuntimeError('התמונה נעלמה מהרשימה; הפעולה נעצרה')
+            self.press(selected)
+            end = time.monotonic() + 5
+            while time.monotonic() < end:
+                _, _, images = self.collection()
+                current = next((i for i in images if self.label(i) == label), None)
+                if current is not None:
+                    break
+                time.sleep(.08)
+            if current is None:
+                raise RuntimeError('התמונה הנבחרת לא נטענה')
+        time.sleep(settle)
         self.click(current, right=True)
         item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
                          and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
@@ -288,12 +286,17 @@ class Chrome:
         button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
         self.press(button)
         target = self.wait_for_new_download(destination, before, default_name)
-        return target, png_size(target)
+        dimensions = png_size(target)
+        # Move directly to the next fullscreen image. This is substantially
+        # faster and more reliable than rescanning/clicking the filmstrip.
+        self.key(124)  # macOS virtual key code: Right Arrow
+        time.sleep(.12)
+        return target, dimensions
 
 
 def main():
     parser = argparse.ArgumentParser(description='Photoroom → Downloads, using the existing Chrome window')
-    parser.add_argument('--settle', type=float, default=2.0)
+    parser.add_argument('--settle', type=float, default=.35)
     parser.add_argument('--limit', type=int, default=0, help='Optional limit for a test run')
     parser.add_argument('--inspect', action='store_true')
     args = parser.parse_args()
@@ -306,52 +309,56 @@ def main():
     except (OSError, json.JSONDecodeError):
         raise RuntimeError('קובץ ההתקדמות ב-Downloads פגום. שנו את שמו או מחקו אותו והפעילו מחדש.')
     browser = Chrome()
-    print('בחרו עכשיו את לשונית Photoroom במצב תמונה מוגדלת. ההפעלה תתחיל בעוד 7 שניות.', flush=True)
+    print('בחרו עכשיו את לשונית Photoroom במצב תמונה מוגדלת. ההפעלה תתחיל בעוד 2 שניות.', flush=True)
     print('אין להשתמש בעכבר ובמקלדת בזמן השמירה. לעצירה: חזרו ל-Terminal ולחצו Control+C.', flush=True)
-    time.sleep(7)
+    time.sleep(2)
     browser.front_guard()
     strip, buttons, images = browser.collection()
     if args.inspect:
         print(json.dumps({'names': [browser.label(b) for b in buttons], 'strip': browser.frame(strip), 'current': [browser.label(i) for i in images]}, ensure_ascii=False, indent=2))
         return
-    browser.rewind()
-    stable, saved_now = 0, 0
-    encountered = set()
-    previous = None
-    for page in range(1000):
-        browser.front_guard()
-        _, buttons, _ = browser.collection()
-        names = [browser.label(b) for b in buttons]
-        encountered.update(names)
-        for label in names:
-            check_stop()
-            entry = state['saved'].get(label)
-            if entry:
-                existing = destination / Path(entry['file']).name
-                if existing.exists() and hashlib.sha256(existing.read_bytes()).hexdigest() == entry['sha256']:
-                    continue
-                raise RuntimeError(f'קובץ שנשמר בעבר חסר או השתנה: {existing.name}. בחרו שם הרצה חדש.')
-            print(f'שומר: {label}', flush=True)
-            target, dimensions = browser.save(label, destination, max(.5, args.settle))
-            state['saved'][label] = {'file': target.name, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'dimensions': dimensions}
-            temporary = state_path.with_suffix('.json.tmp')
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-            temporary.replace(state_path)
-            saved_now += 1
-            print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
-            if args.limit and saved_now >= args.limit:
-                print('הגענו למגבלת הבדיקה. אפשר להריץ שוב להמשך.', flush=True)
-                return
-        signature = browser.signature()
-        browser.scroll(-1)
-        after = browser.signature()
-        stable = stable + 1 if after == signature and after == previous else 0
-        previous = after
-        if stable >= 4:
-            print(f'הגלילה אינה חושפת תמונות נוספות. אומתה שמירת {len(encountered)} תמונות שזוהו באוסף. בדקו שהמספר תואם לאוסף באתר.', flush=True)
+    # Start from the currently open fullscreen image and advance with Right Arrow.
+    # This avoids repeatedly walking and scrolling the thumbnail strip.
+    saved_now = 0
+    seen = set()
+    while True:
+        check_stop()
+        _, buttons, images = browser.collection()
+        labels = [browser.label(i) for i in images]
+        button_labels = [browser.label(b) for b in buttons]
+        current_label = next((name for name in labels if name in button_labels), None)
+        if current_label is None:
+            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
+        if current_label in seen:
+            print(f'הגענו לסוף האוסף. נשמרו {saved_now} תמונות בהרצה זו.', flush=True)
             print(f'הקבצים נשמרו ב־{destination}', flush=True)
             return
-    raise RuntimeError('הגענו למגבלת גלילה. ההתקדמות נשמרה; לא הוכרז סיום האוסף.')
+        seen.add(current_label)
+
+        entry = state['saved'].get(current_label)
+        if entry:
+            existing = destination / Path(entry['file']).name
+            if not existing.exists() or hashlib.sha256(existing.read_bytes()).hexdigest() != entry['sha256']:
+                raise RuntimeError(f'קובץ שנשמר בעבר חסר או השתנה: {existing.name}.')
+            browser.key(124)
+            time.sleep(.12)
+            continue
+
+        print(f'שומר: {current_label}', flush=True)
+        target, dimensions = browser.save(current_label, destination, max(.15, args.settle))
+        state['saved'][current_label] = {
+            'file': target.name,
+            'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+            'dimensions': dimensions
+        }
+        temporary = state_path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        temporary.replace(state_path)
+        saved_now += 1
+        print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
+        if args.limit and saved_now >= args.limit:
+            print('הגענו למגבלת הבדיקה. אפשר להריץ שוב להמשך.', flush=True)
+            return
 
 
 if __name__ == '__main__':
