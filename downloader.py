@@ -200,10 +200,60 @@ class Chrome:
         raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן. ההתקדמות נשמרה.')
 
     def select_downloads(self):
-        """Force Chrome's native save panel to the user's Downloads folder."""
+        """Force Chrome's native save panel to Downloads."""
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.5)
+        time.sleep(.7)
+
+    def download_snapshot(self, destination):
+        """Return regular files currently present in Downloads."""
+        result = {}
+        for path in destination.iterdir():
+            try:
+                if path.is_file() and not path.name.endswith(('.crdownload', '.download')):
+                    stat = path.stat()
+                    result[path.name] = (stat.st_mtime_ns, stat.st_size)
+            except FileNotFoundError:
+                pass
+        return result
+
+    def wait_for_new_download(self, destination, before, default_name, timeout=60):
+        """Identify the file Chrome actually created, independent of extension display."""
+        deadline = time.monotonic() + timeout
+        candidate = None
+        previous_size = None
+        stable = 0
+        default_stem = Path(default_name).stem.casefold()
+        while time.monotonic() < deadline:
+            check_stop()
+            current = self.download_snapshot(destination)
+            changed = []
+            for name, meta in current.items():
+                if name not in before or before[name] != meta:
+                    path = destination / name
+                    if name.endswith(('.crdownload', '.download')):
+                        continue
+                    changed.append(path)
+            # Prefer a name matching Chrome's proposed name/stem. If exactly one
+            # file changed, accept it even when macOS hid or normalized the extension.
+            matching = [p for p in changed if p.name.casefold() == default_name.casefold()
+                        or p.stem.casefold() == default_stem]
+            choices = matching or (changed if len(changed) == 1 else [])
+            if len(choices) == 1:
+                path = choices[0]
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    time.sleep(.25)
+                    continue
+                if candidate == path and size == previous_size and size > 24:
+                    stable += 1
+                else:
+                    candidate, previous_size, stable = path, size, 0
+                if stable >= 3:
+                    return path
+            time.sleep(.4)
+        raise RuntimeError('לא ניתן לזהות ולאמת את הקובץ החדש שנשמר ב-Downloads.')
 
     def save(self, label, destination, settle):
         _, buttons, _ = self.collection()
@@ -222,38 +272,27 @@ class Chrome:
             raise RuntimeError('התמונה הנבחרת לא נטענה')
         time.sleep(settle)
         _, _, images = self.collection()
-        current = next(i for i in images if self.label(i) == label)
+        current = next((i for i in images if self.label(i) == label), None)
+        if current is None:
+            raise RuntimeError('התמונה הנבחרת נעלמה לפני השמירה.')
         self.click(current, right=True)
-        item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem' and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
+        item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
+                         and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
         self.press(item)
         self.select_downloads()
         field = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         default_name = str(self.attr(field, 'AXValue', '')).strip()
         if not default_name:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
-        target = destination / Path(default_name).name
-        if target.exists():
-            raise RuntimeError(f'קובץ בשם {target.name} כבר קיים ב-Downloads. הפעולה נעצרה בלי לדרוס אותו.')
+        before = self.download_snapshot(destination)
         button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
         self.press(button)
-        end = time.monotonic() + 45
-        previous = None
-        stable = 0
-        while time.monotonic() < end:
-            check_stop()
-            if target.exists():
-                size = target.stat().st_size
-                stable = stable + 1 if size == previous and size > 24 else 0
-                if stable >= 3:
-                    return target, png_size(target)
-                previous = size
-            time.sleep(.4)
-        raise RuntimeError('לא ניתן לאמת את שמירת הקובץ; הפעולה נעצרה.')
+        target = self.wait_for_new_download(destination, before, default_name)
+        return target, png_size(target)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Photoroom → Downloads, using the existing Chrome window')
-    parser.add_argument('--session', default='collection', help='Unique name per collection; reuse it to resume')
     parser.add_argument('--settle', type=float, default=2.0)
     parser.add_argument('--limit', type=int, default=0, help='Optional limit for a test run')
     parser.add_argument('--inspect', action='store_true')
@@ -262,7 +301,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     destination = Path.home() / 'Downloads'
     state_path = destination / 'photoroom-progress.json'
-    state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
+    try:
+        state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError('קובץ ההתקדמות ב-Downloads פגום. שנו את שמו או מחקו אותו והפעילו מחדש.')
     browser = Chrome()
     print('בחרו עכשיו את לשונית Photoroom במצב תמונה מוגדלת. ההפעלה תתחיל בעוד 7 שניות.', flush=True)
     print('אין להשתמש בעכבר ובמקלדת בזמן השמירה. לעצירה: חזרו ל-Terminal ולחצו Control+C.', flush=True)
