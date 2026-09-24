@@ -244,9 +244,13 @@ class Chrome:
         self.key(0, self.Q.kCGEventFlagMaskCommand)
         self.type_text(target.name)
         time.sleep(.2)
-        actual = str(self.attr(field, 'AXValue', ''))
-        if actual != target.name:
-            raise RuntimeError('שם הקובץ בחלון השמירה אינו תואם לשם המבוקש; הפעולה נעצרה.')
+        actual = str(self.attr(field, 'AXValue', '')).strip()
+        # Native macOS save panels may hide or normalize the extension in the
+        # visible filename field. The real safety check is the exact target
+        # file that must appear in Downloads after Save.
+        acceptable_names = {target.name, target.stem}
+        if actual and actual not in acceptable_names:
+            raise RuntimeError(f'שם הקובץ בחלון השמירה אינו תואם לשם המבוקש: {actual!r}. הפעולה נעצרה.')
         if target.exists():
             raise RuntimeError('קובץ היעד כבר קיים. הפעולה נעצרה בלי לדרוס אותו.')
         button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
