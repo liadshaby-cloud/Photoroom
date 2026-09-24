@@ -11,7 +11,7 @@ import re
 import signal
 import struct
 import time
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse
 
 STOP = False
 
@@ -199,21 +199,13 @@ class Chrome:
             time.sleep(.25)
         raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן. ההתקדמות נשמרה.')
 
-    def select_downloads(self, target):
-        """Force the native save panel to Downloads.
-
-        macOS does not expose the save panel's current folder reliably through
-        Accessibility. Select Downloads explicitly, then verify the real result
-        after Save by checking the exact target path on disk.
-        """
-        destination = Path.home() / 'Downloads'
-        if target.parent.resolve() != destination.resolve():
-            raise RuntimeError('האפליקציה שומרת רק בתיקיית Downloads של המשתמש.')
+    def select_downloads(self):
+        """Force Chrome's native save panel to the user's Downloads folder."""
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
         time.sleep(.5)
 
-    def save(self, label, target, settle):
+    def save(self, label, destination, settle):
         _, buttons, _ = self.collection()
         selected = next((b for b in buttons if self.label(b) == label), None)
         if selected is None:
@@ -229,27 +221,19 @@ class Chrome:
         else:
             raise RuntimeError('התמונה הנבחרת לא נטענה')
         time.sleep(settle)
-        # Re-read after rendering; never keep stale image references across selection.
         _, _, images = self.collection()
         current = next(i for i in images if self.label(i) == label)
         self.click(current, right=True)
         item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem' and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
         self.press(item)
-        self.select_downloads(target)
+        self.select_downloads()
         field = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
-        self.click(field)
-        self.key(0, self.Q.kCGEventFlagMaskCommand)
-        self.type_text(target.name)
-        time.sleep(.2)
-        actual = str(self.attr(field, 'AXValue', '')).strip()
-        # Native macOS save panels may hide or normalize the extension in the
-        # visible filename field. The real safety check is the exact target
-        # file that must appear in Downloads after Save.
-        acceptable_names = {target.name, target.stem}
-        if actual and actual not in acceptable_names:
-            raise RuntimeError(f'שם הקובץ בחלון השמירה אינו תואם לשם המבוקש: {actual!r}. הפעולה נעצרה.')
+        default_name = str(self.attr(field, 'AXValue', '')).strip()
+        if not default_name:
+            raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
+        target = destination / Path(default_name).name
         if target.exists():
-            raise RuntimeError('קובץ היעד כבר קיים. הפעולה נעצרה בלי לדרוס אותו.')
+            raise RuntimeError(f'קובץ בשם {target.name} כבר קיים ב-Downloads. הפעולה נעצרה בלי לדרוס אותו.')
         button = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'OKButton' and self.label(e) == 'Save')
         self.press(button)
         end = time.monotonic() + 45
@@ -261,7 +245,7 @@ class Chrome:
                 size = target.stat().st_size
                 stable = stable + 1 if size == previous and size > 24 else 0
                 if stable >= 3:
-                    return png_size(target)
+                    return target, png_size(target)
                 previous = size
             time.sleep(.4)
         raise RuntimeError('לא ניתן לאמת את שמירת הקובץ; הפעולה נעצרה.')
@@ -277,8 +261,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     destination = Path.home() / 'Downloads'
-    session = safe_name(args.session)
-    state_path = destination / f'photoroom-{session}-progress.json'
+    state_path = destination / 'photoroom-progress.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
     browser = Chrome()
     print('בחרו עכשיו את לשונית Photoroom במצב תמונה מוגדלת. ההפעלה תתחיל בעוד 7 שניות.', flush=True)
@@ -306,12 +289,8 @@ def main():
                 if existing.exists() and hashlib.sha256(existing.read_bytes()).hexdigest() == entry['sha256']:
                     continue
                 raise RuntimeError(f'קובץ שנשמר בעבר חסר או השתנה: {existing.name}. בחרו שם הרצה חדש.')
-            suffix = hashlib.sha256(label.encode()).hexdigest()[:8]
-            target = destination / f'photoroom-{session}-{safe_name(label)}-{suffix}.png'
-            if target.exists():
-                raise RuntimeError(f'קובץ קיים ללא אישור שמירה ביומן: {target.name}. בחרו שם הרצה חדש.')
             print(f'שומר: {label}', flush=True)
-            dimensions = browser.save(label, target, max(.5, args.settle))
+            target, dimensions = browser.save(label, destination, max(.5, args.settle))
             state['saved'][label] = {'file': target.name, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'dimensions': dimensions}
             temporary = state_path.with_suffix('.json.tmp')
             temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
