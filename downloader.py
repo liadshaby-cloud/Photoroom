@@ -91,13 +91,10 @@ class Chrome:
         return tuple(values)
 
     def front_guard(self):
+        # Do not stop merely because focus temporarily leaves Chrome or because
+        # the pointer reaches a screen corner. Explicit Control+C remains the
+        # supported user-initiated stop mechanism.
         check_stop()
-        front = self.AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        if front.bundleIdentifier() != 'com.google.Chrome':
-            raise RuntimeError('הפעולה נעצרה כי Chrome אינו החלון הפעיל. הפעילו שוב כדי להמשיך.')
-        point = self.Q.CGEventGetLocation(self.Q.CGEventCreate(None))
-        if point.x < 5 and point.y < 5:
-            raise KeyboardInterrupt
 
     def web(self):
         window = self.attr(self.app, 'AXFocusedWindow')
@@ -285,7 +282,7 @@ def main():
     state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
     browser = Chrome()
     print('בחרו עכשיו את לשונית Photoroom במצב תמונה מוגדלת. ההפעלה תתחיל בעוד 7 שניות.', flush=True)
-    print('לעצירה: העבירו את העכבר לפינה השמאלית העליונה, או עברו לחלון אחר. אין להשתמש בעכבר ובמקלדת בזמן השמירה.', flush=True)
+    print('אין להשתמש בעכבר ובמקלדת בזמן השמירה. לעצירה: חזרו ל-Terminal ולחצו Control+C.', flush=True)
     time.sleep(7)
     browser.front_guard()
     strip, buttons, images = browser.collection()
@@ -340,7 +337,7 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print('\nנעצר. הקבצים שכבר נשמרו נשארים ב-Downloads.', flush=True)
+        print('\nנעצר באמצעות Control+C. הקבצים שכבר נשמרו נשארים ב-Downloads.', flush=True)
     except Exception as exc:
         print(f'\nהפעולה נעצרה: {exc}', flush=True)
         raise SystemExit(1)
