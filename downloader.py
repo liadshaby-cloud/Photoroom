@@ -97,15 +97,22 @@ class Chrome:
         check_stop()
 
     def web(self):
+        # Chrome can expose several AXWebArea nodes (tab strip, extensions,
+        # background/other tabs). Do not fail on the first non-Photoroom one.
         window = self.attr(self.app, 'AXFocusedWindow')
         if window is None:
             raise RuntimeError('לא נמצא חלון Chrome פעיל')
+        saw_web_area = False
         for node in self.walk(window):
-            if self.attr(node, 'AXRole') == 'AXWebArea':
-                url = str(self.attr(node, 'AXURL', ''))
-                if urlparse(url).hostname == 'app.photoroom.com' and urlparse(url).path.startswith('/batch'):
-                    return node
-                raise RuntimeError('בחרו את לשונית האוסף בכתובת app.photoroom.com/batch.')
+            if self.attr(node, 'AXRole') != 'AXWebArea':
+                continue
+            saw_web_area = True
+            url = str(self.attr(node, 'AXURL', ''))
+            parsed = urlparse(url)
+            if parsed.hostname == 'app.photoroom.com' and parsed.path.startswith('/batch'):
+                return node
+        if saw_web_area:
+            raise RuntimeError('בחרו את לשונית האוסף בכתובת app.photoroom.com/batch.')
         raise RuntimeError('לא נמצא עמוד Photoroom. סגרו תפריטים וחלונות שמירה ונסו שוב.')
 
     def collection(self):
