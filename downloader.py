@@ -189,21 +189,22 @@ class Chrome:
             previous = current
         raise RuntimeError('לא ניתן לוודא שהגענו לתחילת האוסף; הפעולה נעצרה.')
 
-    def find(self, predicate, timeout=12):
+    def find(self, predicate, timeout=6, root=None):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             check_stop()
-            for element in self.walk(self.app):
+            search_root = root or self.attr(self.app, 'AXFocusedWindow') or self.app
+            for element in self.walk(search_root):
                 if predicate(element):
                     return element
-            time.sleep(.25)
-        raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן. ההתקדמות נשמרה.')
+            time.sleep(.06)
+        raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן.')
 
     def select_downloads(self):
         """Force Chrome's native save panel to Downloads."""
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.15)
+        time.sleep(.04)
 
     def download_snapshot(self, destination):
         """Return regular files currently present in Downloads."""
@@ -217,7 +218,7 @@ class Chrome:
                 pass
         return result
 
-    def wait_for_new_download(self, destination, before, default_name, timeout=20):
+    def wait_for_new_download(self, destination, before, default_name, timeout=12):
         """Identify the file Chrome actually created, independent of extension display."""
         deadline = time.monotonic() + timeout
         candidate = None
@@ -244,7 +245,7 @@ class Chrome:
                 try:
                     size = path.stat().st_size
                 except FileNotFoundError:
-                    time.sleep(.25)
+                    time.sleep(.05)
                     continue
                 if candidate == path and size == previous_size and size > 24:
                     stable += 1
@@ -252,53 +253,44 @@ class Chrome:
                     candidate, previous_size, stable = path, size, 0
                 if stable >= 1:
                     return path
-            time.sleep(.12)
+            time.sleep(.05)
         raise RuntimeError('לא ניתן לזהות ולאמת את הקובץ החדש שנשמר ב-Downloads.')
 
-    def save(self, label, destination, settle):
-        _, buttons, images = self.collection()
-        current = next((i for i in images if self.label(i) == label), None)
+    def save(self, current, label, destination, settle):
         if current is None:
-            selected = next((b for b in buttons if self.label(b) == label), None)
-            if selected is None:
-                raise RuntimeError('התמונה נעלמה מהרשימה; הפעולה נעצרה')
-            self.press(selected)
-            end = time.monotonic() + 5
-            while time.monotonic() < end:
-                _, _, images = self.collection()
-                current = next((i for i in images if self.label(i) == label), None)
-                if current is not None:
-                    break
-                time.sleep(.08)
-            if current is None:
-                raise RuntimeError('התמונה הנבחרת לא נטענה')
-        time.sleep(settle)
+            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
+        if settle:
+            time.sleep(settle)
         self.click(current, right=True)
-        item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
-                         and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
+        item = self.find(
+            lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
+            and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As',
+            timeout=3
+        )
         self.press(item)
-        self.select_downloads()
-        field = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
+        field = self.find(
+            lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField',
+            timeout=3
+        )
         default_name = str(self.attr(field, 'AXValue', '')).strip()
         if not default_name:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
         before = self.download_snapshot(destination)
-        # The filename field is already focused in the native save panel.
-        # Enter activates the default Save button immediately and avoids an
-        # expensive accessibility-tree scan for OKButton.
+        # Downloads is the normal destination. Only issue the shortcut once the
+        # native panel is ready; no additional AX verification is needed.
+        self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
+        time.sleep(.04)
         self.key(36)  # Return / Enter
         target = self.wait_for_new_download(destination, before, default_name)
-        dimensions = png_size(target)
-        # Move directly to the next fullscreen image. This is substantially
-        # faster and more reliable than rescanning/clicking the filmstrip.
-        self.key(124)  # macOS virtual key code: Right Arrow
-        time.sleep(.12)
-        return target, dimensions
+        return target, png_size(target)
+
+    def next_image(self):
+        self.key(124)  # Right Arrow
 
 
 def main():
     parser = argparse.ArgumentParser(description='Photoroom → Downloads, using the existing Chrome window')
-    parser.add_argument('--settle', type=float, default=.35)
+    parser.add_argument('--settle', type=float, default=.05)
     parser.add_argument('--limit', type=int, default=0, help='Optional limit for a test run')
     parser.add_argument('--inspect', action='store_true')
     args = parser.parse_args()
@@ -307,7 +299,7 @@ def main():
     destination = Path.home() / 'Downloads'
     browser = Chrome()
     print('Chrome זוהה. מתחיל מהתמונה המוגדלת הנוכחית.', flush=True)
-    time.sleep(.25)
+    time.sleep(.05)
     browser.front_guard()
     strip, buttons, images = browser.collection()
     if args.inspect:
@@ -318,13 +310,9 @@ def main():
     saved_now = 0
     visited = set()
 
-    def current_label():
+    def current_image_and_label():
         _, buttons, images = browser.collection()
         button_labels = {browser.label(b) for b in buttons}
-        candidates = [browser.label(i) for i in images if browser.label(i) in button_labels]
-        if not candidates:
-            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
-        # The fullscreen image is normally the largest matching AXImage.
         ranked = []
         for image in images:
             name = browser.label(image)
@@ -332,12 +320,15 @@ def main():
                 continue
             frame = browser.frame(image)
             area = frame[2] * frame[3] if frame else 0
-            ranked.append((area, name))
-        return max(ranked)[1] if ranked else candidates[0]
+            ranked.append((area, name, image))
+        if not ranked:
+            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
+        _, name, image = max(ranked, key=lambda x: x[0])
+        return image, name
 
     while True:
         check_stop()
-        label = current_label()
+        current, label = current_image_and_label()
         if label in visited:
             print(f'הגענו לסוף האוסף. נשמרו {saved_now} תמונות בהרצה זו.', flush=True)
             print(f'הקבצים נשמרו ב־{destination}', flush=True)
@@ -345,18 +336,20 @@ def main():
         visited.add(label)
 
         print(f'שומר: {label}', flush=True)
-        target, dimensions = browser.save(label, destination, max(.15, args.settle))
+        target, dimensions = browser.save(current, label, destination, max(0, args.settle))
         saved_now += 1
         print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
         if args.limit and saved_now >= args.limit:
             return
 
         previous = label
-        deadline = time.monotonic() + 3
+        browser.next_image()
+        deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
-            time.sleep(.08)
+            time.sleep(.04)
             try:
-                if current_label() != previous:
+                _, next_label = current_image_and_label()
+                if next_label != previous:
                     break
             except RuntimeError:
                 pass
