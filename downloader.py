@@ -4,6 +4,8 @@ No cookies, remote debugging, private endpoints, or browser-profile copying.
 """
 import argparse
 import ctypes
+import hashlib
+import json
 from pathlib import Path
 import re
 import signal
@@ -97,22 +99,15 @@ class Chrome:
         check_stop()
 
     def web(self):
-        # Chrome can expose several AXWebArea nodes (tab strip, extensions,
-        # background/other tabs). Do not fail on the first non-Photoroom one.
         window = self.attr(self.app, 'AXFocusedWindow')
         if window is None:
             raise RuntimeError('לא נמצא חלון Chrome פעיל')
-        saw_web_area = False
         for node in self.walk(window):
-            if self.attr(node, 'AXRole') != 'AXWebArea':
-                continue
-            saw_web_area = True
-            url = str(self.attr(node, 'AXURL', ''))
-            parsed = urlparse(url)
-            if parsed.hostname == 'app.photoroom.com' and parsed.path.startswith('/batch'):
-                return node
-        if saw_web_area:
-            raise RuntimeError('בחרו את לשונית האוסף בכתובת app.photoroom.com/batch.')
+            if self.attr(node, 'AXRole') == 'AXWebArea':
+                url = str(self.attr(node, 'AXURL', ''))
+                if urlparse(url).hostname == 'app.photoroom.com' and urlparse(url).path.startswith('/batch'):
+                    return node
+                raise RuntimeError('בחרו את לשונית האוסף בכתובת app.photoroom.com/batch.')
         raise RuntimeError('לא נמצא עמוד Photoroom. סגרו תפריטים וחלונות שמירה ונסו שוב.')
 
     def collection(self):
@@ -196,22 +191,21 @@ class Chrome:
             previous = current
         raise RuntimeError('לא ניתן לוודא שהגענו לתחילת האוסף; הפעולה נעצרה.')
 
-    def find(self, predicate, timeout=6, root=None):
+    def find(self, predicate, timeout=12):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             check_stop()
-            search_root = root or self.attr(self.app, 'AXFocusedWindow') or self.app
-            for element in self.walk(search_root):
+            for element in self.walk(self.app):
                 if predicate(element):
                     return element
-            time.sleep(.06)
-        raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן.')
+            time.sleep(.25)
+        raise RuntimeError('האתר או חלון השמירה לא הגיבו בזמן. ההתקדמות נשמרה.')
 
     def select_downloads(self):
         """Force Chrome's native save panel to Downloads."""
         self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.04)
+        time.sleep(.15)
 
     def download_snapshot(self, destination):
         """Return regular files currently present in Downloads."""
@@ -225,7 +219,7 @@ class Chrome:
                 pass
         return result
 
-    def wait_for_new_download(self, destination, before, default_name, timeout=12):
+    def wait_for_new_download(self, destination, before, default_name, timeout=20):
         """Identify the file Chrome actually created, independent of extension display."""
         deadline = time.monotonic() + timeout
         candidate = None
@@ -252,7 +246,7 @@ class Chrome:
                 try:
                     size = path.stat().st_size
                 except FileNotFoundError:
-                    time.sleep(.05)
+                    time.sleep(.25)
                     continue
                 if candidate == path and size == previous_size and size > 24:
                     stable += 1
@@ -260,69 +254,67 @@ class Chrome:
                     candidate, previous_size, stable = path, size, 0
                 if stable >= 1:
                     return path
-            time.sleep(.05)
+            time.sleep(.12)
         raise RuntimeError('לא ניתן לזהות ולאמת את הקובץ החדש שנשמר ב-Downloads.')
 
-    def save(self, current, label, destination, settle):
+    def save(self, label, destination, settle):
+        _, buttons, images = self.collection()
+        current = next((i for i in images if self.label(i) == label), None)
         if current is None:
-            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
-        if settle:
-            time.sleep(settle)
+            selected = next((b for b in buttons if self.label(b) == label), None)
+            if selected is None:
+                raise RuntimeError('התמונה נעלמה מהרשימה; הפעולה נעצרה')
+            self.press(selected)
+            end = time.monotonic() + 5
+            while time.monotonic() < end:
+                _, _, images = self.collection()
+                current = next((i for i in images if self.label(i) == label), None)
+                if current is not None:
+                    break
+                time.sleep(.08)
+            if current is None:
+                raise RuntimeError('התמונה הנבחרת לא נטענה')
+        time.sleep(settle)
         self.click(current, right=True)
-        item = self.find(
-            lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
-            and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As',
-            timeout=3
-        )
+        item = self.find(lambda e: self.attr(e, 'AXRole') == 'AXMenuItem'
+                         and self.label(e).replace('…', '').replace('...', '').strip() == 'Save Image As')
         self.press(item)
-        # In Chrome's native Save panel the filename field receives focus.
-        # Ask the application for that focused element directly instead of
-        # recursively scanning the whole accessibility tree.
-        deadline = time.monotonic() + 3
-        field = None
-        while time.monotonic() < deadline:
-            check_stop()
-            focused = self.attr(self.app, 'AXFocusedUIElement')
-            if focused is not None and self.attr(focused, 'AXIdentifier') == 'saveAsNameTextField':
-                field = focused
-                break
-            time.sleep(.02)
-        if field is None:
-            # Rare fallback for macOS/Chrome versions that do not expose the
-            # filename field as the focused element.
-            field = self.find(
-                lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField',
-                timeout=2
-            )
+        self.select_downloads()
+        field = self.find(lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField')
         default_name = str(self.attr(field, 'AXValue', '')).strip()
         if not default_name:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
         before = self.download_snapshot(destination)
-        self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        # Wait until the Downloads shortcut has actually changed the native
-        # panel's directory. Sending Return immediately can race the panel and
-        # leave it open without starting a download.
-        time.sleep(.10)
+        # The filename field is already focused in the native save panel.
+        # Enter activates the default Save button immediately and avoids an
+        # expensive accessibility-tree scan for OKButton.
         self.key(36)  # Return / Enter
         target = self.wait_for_new_download(destination, before, default_name)
-        return target, png_size(target)
-
-    def next_image(self):
-        self.key(124)  # Right Arrow
+        dimensions = png_size(target)
+        # Move directly to the next fullscreen image. This is substantially
+        # faster and more reliable than rescanning/clicking the filmstrip.
+        self.key(124)  # macOS virtual key code: Right Arrow
+        time.sleep(.12)
+        return target, dimensions
 
 
 def main():
     parser = argparse.ArgumentParser(description='Photoroom → Downloads, using the existing Chrome window')
-    parser.add_argument('--settle', type=float, default=.05)
+    parser.add_argument('--settle', type=float, default=.35)
     parser.add_argument('--limit', type=int, default=0, help='Optional limit for a test run')
     parser.add_argument('--inspect', action='store_true')
     args = parser.parse_args()
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     destination = Path.home() / 'Downloads'
+    state_path = destination / 'photoroom-progress.json'
+    try:
+        state = json.loads(state_path.read_text()) if state_path.exists() else {'saved': {}}
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError('קובץ ההתקדמות ב-Downloads פגום. שנו את שמו או מחקו אותו והפעילו מחדש.')
     browser = Chrome()
     print('Chrome זוהה. מתחיל מהתמונה המוגדלת הנוכחית.', flush=True)
-    time.sleep(.05)
+    time.sleep(.25)
     browser.front_guard()
     strip, buttons, images = browser.collection()
     if args.inspect:
@@ -333,9 +325,13 @@ def main():
     saved_now = 0
     visited = set()
 
-    def current_image_and_label():
+    def current_label():
         _, buttons, images = browser.collection()
         button_labels = {browser.label(b) for b in buttons}
+        candidates = [browser.label(i) for i in images if browser.label(i) in button_labels]
+        if not candidates:
+            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
+        # The fullscreen image is normally the largest matching AXImage.
         ranked = []
         for image in images:
             name = browser.label(image)
@@ -343,36 +339,50 @@ def main():
                 continue
             frame = browser.frame(image)
             area = frame[2] * frame[3] if frame else 0
-            ranked.append((area, name, image))
-        if not ranked:
-            raise RuntimeError('לא ניתן לזהות את התמונה המוגדלת הנוכחית.')
-        _, name, image = max(ranked, key=lambda x: x[0])
-        return image, name
+            ranked.append((area, name))
+        return max(ranked)[1] if ranked else candidates[0]
 
     while True:
         check_stop()
-        current, label = current_image_and_label()
+        label = current_label()
         if label in visited:
             print(f'הגענו לסוף האוסף. נשמרו {saved_now} תמונות בהרצה זו.', flush=True)
             print(f'הקבצים נשמרו ב־{destination}', flush=True)
             return
         visited.add(label)
 
-        print(f'שומר: {label}', flush=True)
-        target, dimensions = browser.save(current, label, destination, max(0, args.settle))
-        saved_now += 1
-        print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
-        if args.limit and saved_now >= args.limit:
-            return
+        entry = state['saved'].get(label)
+        if entry:
+            existing = destination / Path(entry['file']).name
+            if existing.exists() and hashlib.sha256(existing.read_bytes()).hexdigest() == entry['sha256']:
+                print(f'כבר נשמר: {label}', flush=True)
+                browser.key(124)
+            else:
+                # Stale progress must not prevent a fresh save.
+                state['saved'].pop(label, None)
+                continue
+        else:
+            print(f'שומר: {label}', flush=True)
+            target, dimensions = browser.save(label, destination, max(.15, args.settle))
+            state['saved'][label] = {
+                'file': target.name,
+                'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+                'dimensions': dimensions
+            }
+            temporary = state_path.with_suffix('.json.tmp')
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+            temporary.replace(state_path)
+            saved_now += 1
+            print(f'נשמרו בהרצה זו {saved_now} תמונות; {dimensions[0]}×{dimensions[1]}', flush=True)
+            if args.limit and saved_now >= args.limit:
+                return
 
         previous = label
-        browser.next_image()
-        deadline = time.monotonic() + 1.5
+        deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            time.sleep(.04)
+            time.sleep(.08)
             try:
-                _, next_label = current_image_and_label()
-                if next_label != previous:
+                if current_label() != previous:
                     break
             except RuntimeError:
                 pass
