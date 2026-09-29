@@ -224,7 +224,7 @@ class Chrome:
         candidate = None
         previous_size = None
         stable = 0
-        default_stem = Path(default_name).stem.casefold()
+        default_stem = Path(default_name).stem.casefold() if default_name else ''
         while time.monotonic() < deadline:
             check_stop()
             current = self.download_snapshot(destination)
@@ -237,8 +237,10 @@ class Chrome:
                     changed.append(path)
             # Prefer a name matching Chrome's proposed name/stem. If exactly one
             # file changed, accept it even when macOS hid or normalized the extension.
-            matching = [p for p in changed if p.name.casefold() == default_name.casefold()
-                        or p.stem.casefold() == default_stem]
+            matching = [p for p in changed if default_name and (
+                p.name.casefold() == default_name.casefold()
+                or p.stem.casefold() == default_stem
+            )]
             choices = matching or (changed if len(changed) == 1 else [])
             if len(choices) == 1:
                 path = choices[0]
@@ -268,20 +270,15 @@ class Chrome:
             timeout=3
         )
         self.press(item)
-        field = self.find(
-            lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField',
-            timeout=3
-        )
-        default_name = str(self.attr(field, 'AXValue', '')).strip()
-        if not default_name:
-            raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
+        # Snapshot before opening the native save panel, then confirm it by
+        # keyboard as soon as it appears. Avoid scanning the save dialog tree or
+        # reading its filename; those AX calls are the noticeable delay.
         before = self.download_snapshot(destination)
-        # Downloads is the normal destination. Only issue the shortcut once the
-        # native panel is ready; no additional AX verification is needed.
+        time.sleep(.06)
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.04)
+        time.sleep(.03)
         self.key(36)  # Return / Enter
-        target = self.wait_for_new_download(destination, before, default_name)
+        target = self.wait_for_new_download(destination, before, '')
         return target, png_size(target)
 
     def next_image(self):
