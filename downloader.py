@@ -268,16 +268,31 @@ class Chrome:
             timeout=3
         )
         self.press(item)
-        field = self.find(
-            lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField',
-            timeout=3
-        )
+        # In Chrome's native Save panel the filename field receives focus.
+        # Ask the application for that focused element directly instead of
+        # recursively scanning the whole accessibility tree.
+        deadline = time.monotonic() + 3
+        field = None
+        while time.monotonic() < deadline:
+            check_stop()
+            focused = self.attr(self.app, 'AXFocusedUIElement')
+            if focused is not None and self.attr(focused, 'AXIdentifier') == 'saveAsNameTextField':
+                field = focused
+                break
+            time.sleep(.02)
+        if field is None:
+            # Rare fallback for macOS/Chrome versions that do not expose the
+            # filename field as the focused element.
+            field = self.find(
+                lambda e: self.attr(e, 'AXIdentifier') == 'saveAsNameTextField',
+                timeout=2
+            )
         default_name = str(self.attr(field, 'AXValue', '')).strip()
         if not default_name:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
         before = self.download_snapshot(destination)
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.04)
+        time.sleep(.02)
         self.key(36)  # Return / Enter
         target = self.wait_for_new_download(destination, before, default_name)
         return target, png_size(target)
