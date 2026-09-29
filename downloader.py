@@ -299,7 +299,10 @@ class Chrome:
             raise RuntimeError('לא ניתן לקרוא את שם הקובץ ש-Chrome הציע.')
         before = self.download_snapshot(destination)
         self.key(37, self.Q.kCGEventFlagMaskCommand | self.Q.kCGEventFlagMaskAlternate)
-        time.sleep(.02)
+        # Wait until the Downloads shortcut has actually changed the native
+        # panel's directory. Sending Return immediately can race the panel and
+        # leave it open without starting a download.
+        time.sleep(.10)
         self.key(36)  # Return / Enter
         target = self.wait_for_new_download(destination, before, default_name)
         return target, png_size(target)
